@@ -1,148 +1,202 @@
-# RiNOO
-[![Build Status](https://drone.io/github.com/reginaldl/librinoo/status.png)](https://drone.io/github.com/reginaldl/librinoo/latest)
-[![Coverity](https://scan.coverity.com/projects/2835/badge.svg)](https://scan.coverity.com/projects/2835)
+<p align="center">
+  <img src="https://github.com/reginaldl/librinoo/blob/master/doc/logo.png?raw=true" alt="RiNOO Logo" />
+</p>
 
-RiNOO is a socket management library. RiNOO sockets are asynchronous but "appear" synchronous.
+[![Build Status](https://travis-ci.org/reginaldl/librinoo.svg?branch=master)](https://travis-ci.org/reginaldl/librinoo)
+
+# Overview
+
+RiNOO is an asynchronous socket management library which leverages coroutines to make socket "appear" synchronous.
 This is possible by using fast-contexts (see fcontext project). Code looks simple. The complexity
 of asynchronous sockets is hidden.
 RiNOO is a simple way to create high scalability client/server applications.
 
-## Documentation
+# Documentation
 
 * [Using librinoo for fun and profit](https://github.com/reginaldl/librinoo/wiki/Using-librinoo-for-fun-and-profit)
 * [Libevent vs. RiNOO](https://github.com/reginaldl/librinoo/wiki/Libevent-vs.-RiNOO)
 
-## Examples
+# Build
 
-### Hello world!
+```
+$ cmake .
+$ make
+$ make install
+```
 
-    #include "rinoo/rinoo.h"
+# Test
 
-    void task_client(void *socket)
-    {
-    	char a;
+This repository contains a number of tests. After building RiNOO, tests can be executed by running either `make test` or `ctest` (provided by CMake).
+Each test is a standalone binary which will be executed twice:
+ 1. To validate the test
+ 2. To check memory leaks and overflows using `valgrind`
 
-    	rinoo_socket_write(socket, "Hello world!\n", 13);
-    	rinoo_socket_read(socket, &a, 1);
-    	rinoo_socket_destroy(socket);
+# Coroutines
+
+Coroutines allow collaborative multitasking in a process. Each coroutine runs on its own stack and may decide to suspend its processing to allow another coroutine to run.
+RiNOO provides a simple API to create and schedule coroutines, named *tasks*.
+
+## Create tasks
+
+```C
+#include "rinoo/rinoo.h"
+
+void task1(void *sched)
+{
+	printf("Task1 - Hello\n");
+	rn_task_pause(sched);
+	printf("Task1 - World\n");
+}
+
+void task2(void *sched)
+{
+	printf("Task2 - Hello\n");
+	rn_task_pause(sched);
+	printf("Task2 - World\n");
+}
+
+int main(int argc, char **argv)
+{
+	rn_sched_t *sched;
+
+	sched = rn_scheduler();
+	rn_task_start(sched, task1, sched);
+	rn_task_start(sched, task2, sched);
+	rn_scheduler_loop();
+	rn_scheduler_destroy(sched);
+	return 0;
+}
+```
+The above example starts 2 tasks, each prints *Hello*, pauses and prints *World*:
+```
+$ ./a.out
+Task1 - Hello
+Task2 - Hello
+Task1 - World
+Task2 - World
+```
+
+# Coroutines combined with asynchronous sockets
+
+## Hello world!
+
+```C
+#include "rinoo/rinoo.h"
+
+void task_client(void *socket)
+{
+	char a;
+
+	rn_socket_write(socket, "Hello world!\n", 13);
+	rn_socket_read(socket, &a, 1);
+	rn_socket_destroy(socket);
+}
+
+void task_server(void *sched)
+{
+	rn_addr_t addr;
+	rn_socket_t *server;
+	rn_socket_t *client;
+
+	rn_addr4(&addr, "127.0.0.1", 4242);
+	server = rn_tcp_server(sched, &addr);
+	while ((client = rn_tcp_accept(server, NULL)) != NULL) {
+		rn_task_start(sched, task_client, client);
+	}
+	rn_socket_destroy(server);
+}
+
+int main()
+{
+	rn_sched_t *sched;
+
+	sched = rn_scheduler();
+	rn_task_start(sched, task_server, sched);
+	rn_scheduler_loop(sched);
+	rn_scheduler_destroy(sched);
+	return 0;
+}
+```
+
+## Multi-threading
+
+```C
+#include "rinoo/rinoo.h"
+
+void task_client(void *socket)
+{
+	char a;
+
+	rn_socket_write(socket, "Hello world!\n", 13);
+	rn_socket_read(socket, &a, 1);
+	rn_socket_destroy(socket);
+}
+
+void task_server(void *server)
+{
+    rn_sched_t *sched;
+	rn_socket_t *client;
+
+    sched = rn_scheduler_self();
+	while ((client = rn_tcp_accept(server, NULL)) != NULL) {
+            rn_log("Accepted connection on thread %d", sched->id);
+            rn_task_start(sched, task_client, client);
+	}
+	rn_socket_destroy(server);
+}
+
+int main()
+{
+    int i;
+    rn_addr_t addr;
+	rn_sched_t *spawn;
+	rn_sched_t *sched;
+	rn_socket_t *server;
+
+	sched = rn_scheduler();
+    rn_addr4(&addr, "127.0.0.1", 4242);
+    /* Spawning 10 schedulers, each running in a separate thread */
+    rn_spawn(sched, 10);
+    for (i = 0; i <= 10; i++) {
+            spawn = rn_spawn_get(sched, i);
+            server = rn_tcp_server(spawn, &addr);
+            rn_task_start(spawn, task_server, server);
     }
+	rn_scheduler_loop(sched);
+	rn_scheduler_destroy(sched);
+	return 0;
+}
+```
 
-    void task_server(void *sched)
-    {
-    	t_socket *server;
-    	t_socket *client;
+## HTTP
 
-    	server = rinoo_tcp_server(sched, IP_ANY, 4242);
-    	while ((client = rinoo_tcp_accept(server, NULL, NULL)) != NULL) {
-    		rinoo_task_start(sched, task_client, client);
-    	}
-    	rinoo_socket_destroy(server);
-    }
+```C
+#include "rinoo/rinoo.h"
 
-    int main()
-    {
-    	t_sched *sched;
+void http_client(void *sched)
+{
+    rn_addr_t addr;
+    rn_http_t http;
+    rn_socket_t *client;
 
-    	sched = rinoo_sched();
-    	rinoo_task_start(sched, task_server, sched);
-    	rinoo_sched_loop(sched);
-    	rinoo_sched_destroy(sched);
-    	return 0;
-    }
+    rn_addr4(&addr, "127.0.0.1", 4242);
+    client = rn_tcp_client(sched, &addr, 0);
+    rn_http_init(client, &http);
+    rn_http_request_send(&http, RN_HTTP_METHOD_GET, "/", NULL);
+    rn_http_response_get(&http);
+    rn_log("client - %.*s", rn_buffer_size(http.response.buffer), rn_buffer_ptr(http.response.buffer));
+    rn_http_destroy(&http);
+    rn_socket_destroy(client);
+}
 
-### Multi-threading
+int main()
+{
+    rn_sched_t *sched;
 
-    #include "rinoo/rinoo.h"
-
-    void task_client(void *socket)
-    {
-    	char a;
-
-    	rinoo_socket_write(socket, "Hello world!\n", 13);
-    	rinoo_socket_read(socket, &a, 1);
-    	rinoo_socket_destroy(socket);
-    }
-
-    void task_server(void *server)
-    {
-        t_sched *sched;
-    	t_socket *client;
-
-        sched = rinoo_sched_self();
-    	while ((client = rinoo_tcp_accept(server, NULL, NULL)) != NULL) {
-                rinoo_log("Accepted connection on thread %d", sched->id);
-                rinoo_task_start(sched, task_client, client);
-    	}
-    	rinoo_socket_destroy(server);
-    }
-
-    int main()
-    {
-        int i;
-    	t_sched *spawn;
-    	t_sched *sched;
-    	t_socket *server;
-
-    	sched = rinoo_sched();
-    	server = rinoo_tcp_server(sched, IP_ANY, 4242);
-        /* Spawning 10 schedulers, each running in a separate thread */
-        rinoo_spawn(sched, 10);
-        for (i = 1; i <= 10; i++) {
-                spawn = rinoo_spawn_get(sched, i);
-                rinoo_task_start(spawn, task_server, rinoo_socket_dup(spawn, server));
-        }
-        rinoo_task_start(sched, task_server, server);
-    	rinoo_sched_loop(sched);
-    	rinoo_sched_destroy(sched);
-    	return 0;
-    }
-
-### HTTP
-
-    #include "rinoo/rinoo.h"
-
-    void http_client(void *sched)
-    {
-        t_http http;
-        t_socket *client;
-
-        client = rinoo_tcp_client(sched, IP_LOOPBACK, 80, 0);
-        rinoo_http_init(client, &http);
-        rinoo_http_request_send(&http, RINOO_HTTP_METHOD_GET, "/", NULL);
-        rinoo_http_response_get(&http);
-        rinoo_log("client - %.*s", buffer_size(http.response.buffer), buffer_ptr(http.response.buffer));
-        rinoo_http_destroy(&http);
-        rinoo_socket_destroy(client);
-    }
-
-    int main()
-    {
-        t_sched *sched;
-
-        sched = rinoo_sched();
-        rinoo_task_start(sched, http_client, sched);
-        rinoo_sched_loop(sched);
-        rinoo_sched_destroy(sched);
-        return 0;
-    }
-
-### HTTP easy server
-
-    #include "rinoo/rinoo.h"
-
-    t_http_route routes[] = {
-        { "/", 200, RINOO_HTTP_ROUTE_STATIC, .content = "<html><body><center>Welcome to RiNOO HTTP server!<br/><br/><a href=\"/motd\">motd</a></center><body></html>" },
-        { "/motd", 200, RINOO_HTTP_ROUTE_FILE, .file = "/etc/motd" },
-        { NULL, 302, RINOO_HTTP_ROUTE_REDIRECT, .location = "/" }
-    };
-
-    int main()
-    {
-        t_sched *sched;
-
-        sched = rinoo_sched();
-        rinoo_http_easy_server(sched, 0, 4242, routes, sizeof(routes) / sizeof(*routes));
-        rinoo_sched_loop(sched);
-        rinoo_sched_destroy(sched);
-        return 0;
-    }
+    sched = rn_scheduler();
+    rn_task_start(sched, http_client, sched);
+    rn_scheduler_loop(sched);
+    rn_scheduler_destroy(sched);
+    return 0;
+}
+```
